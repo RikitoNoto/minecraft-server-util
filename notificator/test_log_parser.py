@@ -11,14 +11,14 @@ class TestLog:
 
     def test_should_parse_multi_lines(self):
         loglines = (
-            "[20:10:10] [Server thread/INFO]: Stopping server\r\n"
-            "[13:30:12] [Server thread/INFO]: Player TEST standing on air - force-sending blocks below\r\n"
+            "[20:10:10] [Server thread/INFO]: Stopping server\n"
+            "[13:30:12] [Server thread/INFO]: Player TEST standing on air - force-sending blocks below\n"
         )
         log = Log.model_validate(loglines)
         assert len(log.lines) == 2
 
     def test_should_parse_log_line_property(self):
-        loglines = "[20:10:10] [Server thread/INFO]: Stopping server\r\n"
+        loglines = "[20:10:10] [Server thread/INFO]: Stopping server\n"
         log = Log.model_validate(loglines)
         line = log.lines[0]
         assert line.time == time(20, 10, 10)
@@ -35,7 +35,7 @@ class TestLog:
         ],
     )
     def test_should_parse_log_level(self, level_string: str, expected: LogLevel):
-        loglines = f"[20:10:10] [Server thread/{level_string}]: Stopping server\r\n"
+        loglines = f"[20:10:10] [Server thread/{level_string}]: Stopping server\n"
         log = Log.model_validate(loglines)
         line = log.lines[0]
         assert line.level == expected

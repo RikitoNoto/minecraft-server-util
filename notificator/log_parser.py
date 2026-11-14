@@ -45,6 +45,6 @@ class Log(BaseModel):
     def __parse(cls, data: str) -> Any:
         return {
             "lines": [
-                LogLine.from_line(line) for line in data.split("\r\n") if line != ""
+                LogLine.from_line(line) for line in data.split("\n") if line != ""
             ]
         }
