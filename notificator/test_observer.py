@@ -1,8 +1,11 @@
 import asyncio
 from contextlib import suppress
-from datetime import time
+from datetime import date, time, timedelta
+from functools import partial
+import gzip
 import os
 from pathlib import Path
+import shutil
 from tempfile import mkdtemp
 from typing import Callable
 
@@ -65,13 +68,44 @@ class TestHandlerSpy:
 class TestObserver:
     def __generate_log(self, content: str) -> None:
         self.__tempdir = mkdtemp()
+        self.__rotated_count = 0
+        self.__create_log(content)
+
+    def __create_log(self, content: str) -> None:
         with open(self.__log_path, mode="w") as file:
             file.write(content)
+            file.flush()
 
     def __append_log(self, content: str) -> None:
         with open(self.__log_path, mode="a") as file:
             file.write(content)
             file.flush()
+
+    def __remove_log(self) -> None:
+        os.remove(self.__log_path)
+
+    def __rotate_log(self, content: str = "") -> None:
+        """日付が変わったときのログローテーションを再現する
+
+        Minecraft サーバーは日付が変わると、それまでの latest.log を
+        「退避日-連番.log.gz」に圧縮して退避し、latest.log を新規作成する
+        """
+        self.__rotated_count += 1
+        rotated_date = date.today() - timedelta(days=1)
+        rotated_path = os.path.join(
+            self.__tempdir, f"{rotated_date}-{self.__rotated_count}.log.gz"
+        )
+        with (
+            open(self.__log_path, mode="rb") as log_file,
+            gzip.open(rotated_path, mode="wb") as rotated_file,
+        ):
+            shutil.copyfileobj(log_file, rotated_file)
+        self.__remove_log()
+        self.__create_log(content)
+
+    @property
+    def __log_dir(self) -> Path:
+        return Path(self.__tempdir)
 
     @property
     def __log_path(self) -> Path:
@@ -86,17 +120,34 @@ class TestObserver:
     ) -> None:
         """observe を裏で動かしつつ appends を追記し、until が真になるまで待つ"""
 
+        self.__observe_with_actions(
+            handlers=handlers,
+            actions=[partial(self.__append_log, content) for content in appends],
+            until=until,
+            timeout_sec=timeout_sec,
+        )
+
+    def __observe_with_actions(
+        self,
+        handlers: list[Handler],
+        actions: list[Callable[[], None]],
+        until: Callable[[], bool],
+        timeout_sec: float = TIMEOUT_SEC,
+    ) -> None:
+        """observe を裏で動かしつつ actions を順に実行し、until が真になるまで待つ"""
+
         async def run() -> None:
             observer = Observer()
             task = asyncio.create_task(
-                observer.observe(self.__log_path, handlers, interval_ms=INTERVAL_MS)
+                observer.observe(self.__log_dir, handlers, interval_ms=INTERVAL_MS)
             )
             try:
                 # observe が既存行を読み終えるのを待つ
                 await asyncio.sleep(INTERVAL_MS / 1000 * 2)
-                for content in appends:
-                    self.__append_log(content)
-                    await asyncio.sleep(INTERVAL_MS / 1000)
+                for action in actions:
+                    action()
+                    # observe が変更を読み取るのを待つ
+                    await asyncio.sleep(INTERVAL_MS / 1000 * 3)
                 await self.__wait_until(until, timeout_sec)
             finally:
                 task.cancel()
@@ -249,6 +300,94 @@ class TestObserver:
 
         assert spy.handle_count == 0
         assert spy.is_trigger_count == 0
+
+    def test_should_call_handle_for_line_appended_after_log_rotation(self):
+        """日付が変わって latest.log が新規作成された後の追記も検知する"""
+
+        self.__generate_log("[23:59:59] [Server thread/INFO]: Saving the game\r\n")
+        spy = HandlerSpy()
+
+        self.__observe_with_actions(
+            handlers=[spy],
+            actions=[
+                self.__rotate_log,
+                partial(
+                    self.__append_log,
+                    "[00:00:01] [Server thread/INFO]: Stopping server\r\n",
+                ),
+            ],
+            until=lambda: spy.handle_count >= 1,
+        )
+
+        assert [line.message for line in spy.handled_lines] == ["Stopping server"]
+
+    def test_should_call_handle_for_line_written_by_log_rotation(self):
+        """ローテーション直後の新ファイルに最初から書かれている行も検知する"""
+
+        self.__generate_log("[23:59:59] [Server thread/INFO]: Saving the game\r\n")
+        spy = HandlerSpy()
+
+        self.__observe_with_actions(
+            handlers=[spy],
+            actions=[
+                partial(
+                    self.__rotate_log,
+                    "[00:00:00] [Server thread/INFO]: Starting minecraft server\r\n",
+                )
+            ],
+            until=lambda: spy.handle_count >= 1,
+        )
+
+        assert [line.message for line in spy.handled_lines] == [
+            "Starting minecraft server"
+        ]
+
+    def test_should_not_call_handle_again_for_lines_rotated_away(self):
+        """ローテーション前に検知済みの行を、ローテーション後に再通知しない"""
+
+        self.__generate_log("[19:00:00] [Server thread/INFO]: Starting server\r\n")
+        spy = HandlerSpy()
+
+        self.__observe_with_actions(
+            handlers=[spy],
+            actions=[
+                partial(
+                    self.__append_log,
+                    "[23:59:59] [Server thread/INFO]: Saving the game\r\n",
+                ),
+                self.__rotate_log,
+                partial(
+                    self.__append_log,
+                    "[00:00:01] [Server thread/INFO]: Stopping server\r\n",
+                ),
+            ],
+            until=lambda: spy.handle_count >= 2,
+        )
+
+        assert [line.message for line in spy.handled_lines] == [
+            "Saving the game",
+            "Stopping server",
+        ]
+
+    def test_should_keep_observing_while_log_does_not_exist(self):
+        """ローテーション中に latest.log が一時的に存在しなくても監視を継続する"""
+
+        self.__generate_log("[23:59:59] [Server thread/INFO]: Saving the game\r\n")
+        spy = HandlerSpy()
+
+        self.__observe_with_actions(
+            handlers=[spy],
+            actions=[
+                self.__remove_log,
+                partial(
+                    self.__create_log,
+                    "[00:00:01] [Server thread/INFO]: Stopping server\r\n",
+                ),
+            ],
+            until=lambda: spy.handle_count >= 1,
+        )
+
+        assert [line.message for line in spy.handled_lines] == ["Stopping server"]
 
     def test_should_call_handle_for_each_line_when_write_same_time(self):
         self.__generate_log("")
