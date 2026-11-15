@@ -70,14 +70,14 @@ if __name__ == "__main__":
     if not webhook_url:
         raise ValueError("WEBHOOK_URLを設定してください")
 
-    logfile_path = getenv("LOGFILE_PATH")
-    if not logfile_path:
-        raise ValueError("LOGFILE_PATHを設定してください")
+    logdir_path = getenv("LOGDIR_PATH")
+    if not logdir_path:
+        raise ValueError("LOGDIR_PATHを設定してください")
 
     observer = Observer()
     asyncio.run(
         observer.observe(
-            Path(logfile_path),
+            Path(logdir_path),
             handlers=[
                 UserJoinHandler(webhook_url),
                 UserLeftHandler(webhook_url),
